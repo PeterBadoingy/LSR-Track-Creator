@@ -31,6 +31,9 @@ namespace RaceTrackCreator
         private static StartSide currentStartSide = StartSide.Right;
         private static ExportOrder currentExportOrder = ExportOrder.PlayerFirst;
         private static float sideMultiplier = 1.0f;
+        
+        private static bool startsLocked = false;
+        private static bool snapToRoad = false;
 
         private static int carsWide = 1;
         private static int rowsBack = 0;
@@ -41,6 +44,7 @@ namespace RaceTrackCreator
 
         private static MenuPool pool = new MenuPool();
         private static UIMenu mainMenu;
+        private static UIMenuCheckboxItem lockItem;
 
         private static Keys MenuKey = Keys.F8;
         private static Keys ExportKey = Keys.F6;
@@ -77,19 +81,39 @@ namespace RaceTrackCreator
             wideItem.OnListChanged += (s, i) => { carsWide = wideItem.Index + 1; UpdateStarts(); };
             mainMenu.AddItem(wideItem);
 
-            UIMenuListItem rowsItem = new UIMenuListItem("Rows Back", new List<dynamic> { 0, 1, 2, 3, 4, 5 }, 0);
+            UIMenuListItem rowsItem = new UIMenuListItem("Rows Back", new List<dynamic> { 0, 1, 2, 3, 4 }, 0);
             rowsItem.OnListChanged += (s, i) => { rowsBack = rowsItem.Index; UpdateStarts(); };
             mainMenu.AddItem(rowsItem);
 
-            List<dynamic> spacingValues = new List<dynamic> { 3.0f, 3.5f, 4.0f, 4.5f, 5.0f, 5.5f, 6.0f, 6.5f, 7.0f, 7.5f, 8.0f, 8.5f, 9.0f };
+            List<dynamic> spacingValues = new List<dynamic> { 1.5f, 2.0f, 2.5f, 3.0f, 3.5f, 4.0f, 4.5f, 5.0f, 5.5f, 6.0f, 6.5f, 7.0f, 7.5f, 8.0f, 8.5f, 9.0f };
             UIMenuListItem spaceItem = new UIMenuListItem("Side Spacing", spacingValues, 3);
             spaceItem.OnListChanged += (s, i) => { sideSpacing = (float)spacingValues[i]; UpdateStarts(); };
             mainMenu.AddItem(spaceItem);
 
-
             UIMenuListItem orderItem = new UIMenuListItem("Export Order", new List<dynamic> { "Player First", "Player Last" }, 0);
             orderItem.OnListChanged += (s, i) => { currentExportOrder = (ExportOrder)i; };
             mainMenu.AddItem(orderItem);
+
+            lockItem = new UIMenuCheckboxItem("Lock Starts & Hide", startsLocked, "Freezes the starting grid and hides the preview vehicles so you can drive the track.");
+            lockItem.CheckboxEvent += (i, isChecked) =>
+            {
+                startsLocked = isChecked;
+                if (startsLocked)
+                {
+                    ClearPreviewVehicles();
+                    Game.DisplayNotification("~g~Starts Locked & Hidden!");
+                }
+                else
+                {
+                    UpdateStarts();
+                    Game.DisplayNotification("~y~Starts Unlocked!");
+                }
+            };
+            mainMenu.AddItem(lockItem);
+
+            UIMenuCheckboxItem snapItem = new UIMenuCheckboxItem("Snap Checkpoint to Road", snapToRoad, "Automatically places the checkpoint on the nearest valid road node instead of your exact position.");
+            snapItem.CheckboxEvent += (i, isChecked) => { snapToRoad = isChecked; };
+            mainMenu.AddItem(snapItem);
 
             UIMenuItem addItem = new UIMenuItem($"Add Checkpoint ({AddCheckpointKey})");
             addItem.Activated += (m, i) => AddCheckpoint();
@@ -115,8 +139,8 @@ namespace RaceTrackCreator
                 if (Game.IsKeyDown(MenuKey))
                 {
                     mainMenu.Visible = !mainMenu.Visible;
-                    if (!mainMenu.Visible) ClearPreviews();
-                    else UpdateStarts();
+                    if (!mainMenu.Visible) ClearPreviewVehicles();
+                    else if (!startsLocked) UpdateStarts();
                 }
 
                 foreach (Vector3 cp in checkpoints)
@@ -131,11 +155,28 @@ namespace RaceTrackCreator
                         false, 0, 0, false);
                 }
 
+                if (checkpoints.Count > 0)
+                {
+                    float dist = Vector3.Distance(Game.LocalPlayer.Character.Position, checkpoints.Last());
+                    NativeFunction.Natives.SET_TEXT_FONT(4);
+                    NativeFunction.Natives.SET_TEXT_SCALE(0.5f, 0.5f);
+                    NativeFunction.Natives.SET_TEXT_COLOUR(255, 255, 255, 255);
+                    NativeFunction.Natives.SET_TEXT_OUTLINE();
+                    NativeFunction.Natives.SET_TEXT_CENTRE(true);
+                    NativeFunction.Natives.BEGIN_TEXT_COMMAND_DISPLAY_TEXT("STRING");
+                    NativeFunction.Natives.ADD_TEXT_COMPONENT_SUBSTRING_PLAYER_NAME($"Distance to Last Checkpoint: {dist:F0}m");
+                    NativeFunction.Natives.END_TEXT_COMMAND_DISPLAY_TEXT(0.5f, 0.88f);
+                }
+
                 if (mainMenu.Visible)
                 {
                     if (Game.IsKeyDown(AddCheckpointKey)) AddCheckpoint();
                     if (Game.IsKeyDown(ExportKey)) ExportCSharp();
                     if (Game.IsKeyDown(ClearAllKey)) ClearAll();
+                }
+                else
+                {
+                    if (Game.IsKeyDown(AddCheckpointKey)) AddCheckpoint();
                 }
             }
         }
@@ -166,8 +207,10 @@ namespace RaceTrackCreator
 
         private static void UpdateStarts()
         {
+            if (startsLocked) return;
+
             starts.Clear();
-            ClearPreviews();
+            ClearPreviewVehicles();
             Vehicle pv = Game.LocalPlayer.Character.CurrentVehicle ?? Game.LocalPlayer.Character.LastVehicle;
             if (pv == null) return;
             pv.Model.Load();
@@ -180,13 +223,37 @@ namespace RaceTrackCreator
             }
         }
 
+        /// <summary>
+        /// NEW: Tunnel-aware Ground Detection. 
+        /// Uses a Raycast downward from the player's height to find the floor.
+        /// </summary>
         private static Vector3 GetGroundPos(Vector3 pos)
         {
-            float groundZ;
-            if (NativeFunction.Natives.GET_GROUND_Z_FOR_3D_COORD<bool>(pos.X, pos.Y, pos.Z + 5.0f, out groundZ, false))
+            // We cast from 10 units above the calculated point down to 20 units below.
+            // This captures the floor of a tunnel even if you are on a slope.
+            int handle = NativeFunction.Natives.START_SHAPE_TEST_CAPSULE<int>(
+                pos.X, pos.Y, pos.Z + 10.0f, 
+                pos.X, pos.Y, pos.Z - 20.0f, 
+                2.0f, 1, 0, 7);
+
+            bool hit;
+            Vector3 endPos, surfaceNormal;
+            int entityHit;
+            
+            int result = NativeFunction.Natives.GET_SHAPE_TEST_RESULT<int>(handle, out hit, out endPos, out surfaceNormal, out entityHit);
+
+            if (hit)
             {
-                return new Vector3(pos.X, pos.Y, groundZ);
+                return new Vector3(pos.X, pos.Y, endPos.Z + 0.15f);
             }
+
+            // Fallback if raycast fails
+            float groundZ;
+            if (NativeFunction.Natives.GET_GROUND_Z_FOR_3D_COORD<bool>(pos.X, pos.Y, pos.Z, out groundZ, false))
+            {
+                return new Vector3(pos.X, pos.Y, groundZ + 0.15f);
+            }
+
             return pos;
         }
 
@@ -201,7 +268,7 @@ namespace RaceTrackCreator
             {
                 int row = i / frontWidth;
                 int col = i % frontWidth;
-                Vector3 offset = new Vector3((col * sideSpacing) * sideMultiplier, -row * 10.0f, 0f);
+                Vector3 offset = new Vector3((col * sideSpacing) * sideMultiplier, -row * 8.0f, 0f);
                 Vector3 pos = GetGroundPos(basePos + offset.RotateZ(heading));
                 starts.Add(new StartPos { Position = pos, Heading = heading });
                 if (i > 0) CreatePreviewVehicle(pv.Model, pos, heading);
@@ -219,10 +286,12 @@ namespace RaceTrackCreator
             {
                 int row = i / frontWidth;
                 int col = i % frontWidth;
-                Vector3 offset = new Vector3((col * sideSpacing) * sideMultiplier, -row * 10.0f, 0f);
-                Vector3 pos = GetGroundPos(basePos + offset.RotateZ(heading));
-                starts.Add(new StartPos { Position = pos, Heading = heading });
-                if (i > 0) CreatePreviewVehicle(pv.Model, pos, heading);
+                Vector3 offset = new Vector3((col * sideSpacing) * sideMultiplier, -row * 8.0f, 0f);
+                Vector3 targetPos = basePos + offset.RotateZ(heading);
+                Vector3 snappedPos = GetGroundPos(targetPos);
+
+                starts.Add(new StartPos { Position = snappedPos, Heading = heading });
+                if (i > 0) CreatePreviewVehicle(pv.Model, snappedPos, heading);
             }
         }
 
@@ -237,7 +306,7 @@ namespace RaceTrackCreator
             {
                 int row = i / frontWidth;
                 int col = i % frontWidth;
-                Vector3 offset = new Vector3((col * sideSpacing) * sideMultiplier, (-row * 10.0f) - (col * 3.0f), 0f);
+                Vector3 offset = new Vector3((col * sideSpacing) * sideMultiplier, (-row * 8.0f) - (col * 2.0f), 0f);
                 Vector3 pos = GetGroundPos(basePos + offset.RotateZ(heading));
                 starts.Add(new StartPos { Position = pos, Heading = heading });
                 if (i > 0) CreatePreviewVehicle(pv.Model, pos, heading);
@@ -260,6 +329,14 @@ namespace RaceTrackCreator
         private static void AddCheckpoint()
         {
             Vector3 pos = Game.LocalPlayer.Character.Position;
+            if (snapToRoad)
+            {
+                Vector3 roadPos;
+                if (NativeFunction.Natives.GET_CLOSEST_VEHICLE_NODE<bool>(pos.X, pos.Y, pos.Z, out roadPos, 1, 3.0f, 0))
+                {
+                    pos = roadPos;
+                }
+            }
             checkpoints.Add(pos);
             Blip b = new Blip(pos);
             b.Color = Color.DeepSkyBlue;
@@ -284,23 +361,25 @@ namespace RaceTrackCreator
 
         private static void ClearAll()
         {
-            ClearPreviews();
+            startsLocked = false;
+            if (lockItem != null) lockItem.Checked = false;
+            ClearPreviewVehicles();
+            foreach (Blip b in previewBlips) if (b.Exists()) b.Delete();
+            previewBlips.Clear();
             checkpoints.Clear();
             starts.Clear();
+            Game.DisplayNotification("~y~All cleared and starts unlocked.");
         }
 
-        private static void ClearPreviews()
+        private static void ClearPreviewVehicles()
         {
             foreach (Vehicle v in previewVehicles) if (v.Exists()) v.Delete();
-            foreach (Blip b in previewBlips) if (b.Exists()) b.Delete();
             previewVehicles.Clear();
-            previewBlips.Clear();
         }
 
         private static void ExportCSharp()
         {
             if (checkpoints.Count == 0 && starts.Count == 0) return;
-
             StringBuilder sb = new StringBuilder();
             string varName = trackName.Replace(" ", "").Replace("_", "").ToLower();
             string displayName = trackName.Replace("_", " ");
@@ -308,13 +387,8 @@ namespace RaceTrackCreator
 
             sb.AppendLine($"        List<VehicleRaceStartingPosition> {varName}start = new List<VehicleRaceStartingPosition>()");
             sb.AppendLine("        {");
-
-            // Handle Export Order Logic
             List<StartPos> finalOrder = new List<StartPos>(starts);
-            if (currentExportOrder == ExportOrder.PlayerLast)
-            {
-                finalOrder.Reverse(); 
-            }
+            if (currentExportOrder == ExportOrder.PlayerLast) finalOrder.Reverse(); 
 
             for (int i = 0; i < finalOrder.Count; i++)
             {
@@ -337,17 +411,8 @@ namespace RaceTrackCreator
             sb.AppendLine($"        VehicleRaceTypeManager.VehicleRaceTracks.Add({varName});");
 
             string fileName = "CustomTrackCode_" + trackName + ".txt";
-
-            try
-            {
-                File.WriteAllText(fileName, sb.ToString());
-                Game.DisplayNotification($"~g~Exported C# Code:~w~\n{fileName}");
-            }
-            catch (Exception ex)
-            {
-                Game.LogTrivial("TrackCreator Error: " + ex.Message);
-                Game.DisplayNotification("~r~Code Export Failed!~w~ Check logs.");
-            }
+            try { File.WriteAllText(fileName, sb.ToString()); Game.DisplayNotification($"~g~Exported C# Code:~w~\n{fileName}"); }
+            catch (Exception ex) { Game.LogTrivial("TrackCreator Error: " + ex.Message); Game.DisplayNotification("~r~Code Export Failed!"); }
         }
 
         public class StartPos { public Vector3 Position { get; set; } public float Heading { get; set; } }

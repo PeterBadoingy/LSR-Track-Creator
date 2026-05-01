@@ -37,10 +37,10 @@ namespace RaceTrackCreator
 
         private static int carsWide = 1;
         private static int rowsBack = 0;
-        private static float sideSpacing = 4.5f;
+        private static float sideSpacing = 3.5f;
 
         private static string trackName = "My_Custom_Race";
-        private const int MaxStarts = 12;
+        private const int MaxStarts = 8;
 
         private static MenuPool pool = new MenuPool();
         private static UIMenu mainMenu;

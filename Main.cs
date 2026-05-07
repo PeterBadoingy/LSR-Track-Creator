@@ -38,6 +38,7 @@ namespace RaceTrackCreator
         private static int carsWide = 1;
         private static int rowsBack = 0;
         private static float sideSpacing = 3.5f;
+        private static float rowSpacing = 8.0f;
 
         private static string trackName = "My_Custom_Race";
         private const int MaxStarts = 8;
@@ -77,11 +78,11 @@ namespace RaceTrackCreator
             };
             mainMenu.AddItem(sideItem);
 
-            UIMenuListItem wideItem = new UIMenuListItem("Cars Wide", new List<dynamic> { 1, 2, 3, 4, 5 }, 0);
+            UIMenuListItem wideItem = new UIMenuListItem("Cars Wide", new List<dynamic> { 1, 2, 3, 4 }, 0);
             wideItem.OnListChanged += (s, i) => { carsWide = wideItem.Index + 1; UpdateStarts(); };
             mainMenu.AddItem(wideItem);
 
-            UIMenuListItem rowsItem = new UIMenuListItem("Rows Back", new List<dynamic> { 0, 1, 2, 3, 4 }, 0);
+            UIMenuListItem rowsItem = new UIMenuListItem("Rows Back", new List<dynamic> { 0, 1, 2, 3 }, 0);
             rowsItem.OnListChanged += (s, i) => { rowsBack = rowsItem.Index; UpdateStarts(); };
             mainMenu.AddItem(rowsItem);
 
@@ -89,6 +90,11 @@ namespace RaceTrackCreator
             UIMenuListItem spaceItem = new UIMenuListItem("Side Spacing", spacingValues, 3);
             spaceItem.OnListChanged += (s, i) => { sideSpacing = (float)spacingValues[i]; UpdateStarts(); };
             mainMenu.AddItem(spaceItem);
+
+            List<dynamic> rowValues = new List<dynamic> { 8.0f, 8.5f, 9.0f, 9.5f, 10.0f, 10.5f, 11.0f, 11.5f, 12.0f };
+            UIMenuListItem rowSpaceItem = new UIMenuListItem("Row Spacing", rowValues, 0, "Distance between rows (8.0 is baseline).");
+            rowSpaceItem.OnListChanged += (s, i) => { rowSpacing = (float)rowValues[i]; UpdateStarts(); };
+            mainMenu.AddItem(rowSpaceItem);
 
             UIMenuListItem orderItem = new UIMenuListItem("Export Order", new List<dynamic> { "Player First", "Player Last" }, 0);
             orderItem.OnListChanged += (s, i) => { currentExportOrder = (ExportOrder)i; };
@@ -194,7 +200,6 @@ namespace RaceTrackCreator
             ClearPreviewVehicles();
             Vehicle pv = Game.LocalPlayer.Character.CurrentVehicle ?? Game.LocalPlayer.Character.LastVehicle;
             if (pv == null) return;
-            pv.Model.Load();
             switch (currentStartType)
             {
                 case StartType.Drag: SetupDrag(pv); break;
@@ -204,18 +209,29 @@ namespace RaceTrackCreator
         }
 
         /// <summary>
-        /// Finds the floor height using a raycast, requesting collision at coordinates first.
+        /// Finds the floor height using a raycast,
         /// </summary>
         private static Vector3 GetGroundPos(Vector3 pos)
         {
-            NativeFunction.Natives.REQUEST_COLLISION_AT_COORD(pos.X, pos.Y, pos.Z);
-            int handle = NativeFunction.Natives.START_SHAPE_TEST_CAPSULE<int>(pos.X, pos.Y, pos.Z + 10.0f, pos.X, pos.Y, pos.Z - 10.0f, 1.0f, 1, 0, 7);
+            Vector3 playerPos = Game.LocalPlayer.Character.Position;
+
+            float groundZ;
+            bool foundGround = NativeFunction.Natives.GET_GROUND_Z_FOR_3D_COORD<bool>(pos.X, pos.Y, pos.Z + 10.0f, out groundZ, false);
+
+            if (foundGround)
+            {
+                return new Vector3(pos.X, pos.Y, groundZ);
+            }
+            int handle = NativeFunction.Natives.START_SHAPE_TEST_CAPSULE<int>(
+                pos.X, pos.Y, pos.Z - 20.0f,
+                pos.X, pos.Y, pos.Z + 20.0f,
+                1.0f, 1, 0, 7);
+
             bool hit; Vector3 endPos, surfaceNormal; int entityHit;
             NativeFunction.Natives.GET_SHAPE_TEST_RESULT<int>(handle, out hit, out endPos, out surfaceNormal, out entityHit);
-            if (hit) return new Vector3(pos.X, pos.Y, endPos.Z);
-            float groundZ;
-            if (NativeFunction.Natives.GET_GROUND_Z_FOR_3D_COORD<bool>(pos.X, pos.Y, pos.Z, out groundZ, false)) return new Vector3(pos.X, pos.Y, groundZ);
-            return pos;
+
+            if (hit) return endPos;
+            return playerPos;
         }
 
         /// <summary>
@@ -223,21 +239,19 @@ namespace RaceTrackCreator
         /// </summary>
         private static void CreatePreviewVehicle(Model model, Vector3 pos, float heading)
         {
-            Vehicle v = new Vehicle(model, pos, heading);
+            if (!model.IsLoaded) model.LoadAndWait();
+
+            Vehicle v = new Vehicle(model, pos + new Vector3(0f, 0f, 2.0f), heading);
+
             if (v.Exists())
             {
                 v.Opacity = 0.4f;
                 v.IsCollisionProof = true;
+                v.IsPersistent = true;
 
-                // FIX: Calculate Z-offset to prevent sinking. 
-                // We add half the model's height to place the bottom of the wheels on the ground.
-                Vector3 min, max;
-                NativeFunction.Natives.GET_MODEL_DIMENSIONS(model.Hash, out min, out max);
-                float zOffset = Math.Abs(min.Z);
-
-                NativeFunction.Natives.SET_ENTITY_COORDS_NO_OFFSET(v, pos.X, pos.Y, pos.Z + zOffset, false, false, false);
-                v.Heading = heading;
-                NativeFunction.Natives.FREEZE_ENTITY_POSITION(v, true);
+                
+                NativeFunction.Natives.SET_VEHICLE_ON_GROUND_PROPERLY(v, true);          
+                v.IsPositionFrozen = true;
                 previewVehicles.Add(v);
             }
         }
@@ -246,11 +260,19 @@ namespace RaceTrackCreator
         {
             int frontWidth = 2;
             int total = Math.Min(frontWidth + (frontWidth * rowsBack), MaxStarts);
+
+            Vector3 fwd = pv.ForwardVector; fwd.Z = 0; fwd.Normalize();
+            Vector3 rgt = pv.RightVector; rgt.Z = 0; rgt.Normalize();
+
             for (int i = 0; i < total; i++)
             {
                 int row = i / frontWidth; int col = i % frontWidth;
-                Vector3 offset = new Vector3((col * sideSpacing) * sideMultiplier, -row * 8.0f, 0f);
-                Vector3 pos = GetGroundPos(pv.Position + offset.RotateZ(pv.Heading));
+                float offsetX = (col * sideSpacing) * sideMultiplier;
+                float offsetY = -row * rowSpacing;
+
+                Vector3 targetPos = pv.Position + (rgt * offsetX) + (fwd * offsetY);
+                Vector3 pos = GetGroundPos(targetPos);
+
                 starts.Add(new StartPos { Position = pos, Heading = pv.Heading });
                 if (i > 0) CreatePreviewVehicle(pv.Model, pos, pv.Heading);
             }
@@ -259,11 +281,19 @@ namespace RaceTrackCreator
         private static void SetupLined(Vehicle pv)
         {
             int total = Math.Min(carsWide + (carsWide * rowsBack), MaxStarts);
+
+            Vector3 fwd = pv.ForwardVector; fwd.Z = 0; fwd.Normalize();
+            Vector3 rgt = pv.RightVector; rgt.Z = 0; rgt.Normalize();
+
             for (int i = 0; i < total; i++)
             {
                 int row = i / carsWide; int col = i % carsWide;
-                Vector3 offset = new Vector3((col * sideSpacing) * sideMultiplier, -row * 8.0f, 0f);
-                Vector3 pos = GetGroundPos(pv.Position + offset.RotateZ(pv.Heading));
+                float offsetX = (col * sideSpacing) * sideMultiplier;
+                float offsetY = -row * rowSpacing;
+
+                Vector3 targetPos = pv.Position + (rgt * offsetX) + (fwd * offsetY);
+                Vector3 pos = GetGroundPos(targetPos);
+
                 starts.Add(new StartPos { Position = pos, Heading = pv.Heading });
                 if (i > 0) CreatePreviewVehicle(pv.Model, pos, pv.Heading);
             }
@@ -272,11 +302,19 @@ namespace RaceTrackCreator
         private static void SetupStaggered(Vehicle pv)
         {
             int total = Math.Min(carsWide + (carsWide * rowsBack), MaxStarts);
+
+            Vector3 fwd = pv.ForwardVector; fwd.Z = 0; fwd.Normalize();
+            Vector3 rgt = pv.RightVector; rgt.Z = 0; rgt.Normalize();
+
             for (int i = 0; i < total; i++)
             {
                 int row = i / carsWide; int col = i % carsWide;
-                Vector3 offset = new Vector3((col * sideSpacing) * sideMultiplier, (-row * 8.0f) - (col * 2.0f), 0f);
-                Vector3 pos = GetGroundPos(pv.Position + offset.RotateZ(pv.Heading));
+                float offsetX = (col * sideSpacing) * sideMultiplier;
+                float offsetY = (-row * rowSpacing) - (col * 2.0f);
+
+                Vector3 targetPos = pv.Position + (rgt * offsetX) + (fwd * offsetY);
+                Vector3 pos = GetGroundPos(targetPos);
+
                 starts.Add(new StartPos { Position = pos, Heading = pv.Heading });
                 if (i > 0) CreatePreviewVehicle(pv.Model, pos, pv.Heading);
             }
@@ -287,11 +325,66 @@ namespace RaceTrackCreator
         /// </summary>
         private static void AddCheckpoint()
         {
-            Vector3 pos = Game.LocalPlayer.Character.Position;
+            Vector3 playerPos = Game.LocalPlayer.Character.Position;
+            Vector3 pos = GetGroundPos(playerPos);
+
             if (snapToRoad)
             {
-                Vector3 roadPos;
-                if (NativeFunction.Natives.GET_CLOSEST_VEHICLE_NODE<bool>(pos.X, pos.Y, pos.Z, out roadPos, 1, 3.0f, 0)) pos = roadPos;
+                Vector3 finalSnappedPos = Vector3.Zero;
+                float finalHeading = 0f;
+                float closestDist = float.MaxValue;
+                bool foundValidNode = false;
+
+                Vehicle pv = Game.LocalPlayer.Character.CurrentVehicle ?? Game.LocalPlayer.Character.LastVehicle;
+                bool isWaterVehicle = pv != null && (pv.IsBoat || NativeFunction.Natives.IS_THIS_MODEL_A_JETSKI<bool>(pv.Model.Hash));
+                int[] nodeTypesToSearch = isWaterVehicle ? new int[] { 3 } : new int[] { 0, 1, 8 };
+
+                foreach (int nodeType in nodeTypesToSearch)
+                {
+                    Vector3 tempPos;
+                    float tempHeading;
+
+                    bool found = NativeFunction.Natives.GET_CLOSEST_VEHICLE_NODE_WITH_HEADING<bool>(
+                        playerPos.X, playerPos.Y, playerPos.Z,
+                        out tempPos,
+                        out tempHeading,
+                        nodeType,
+                        3.0f, 0
+                    );
+
+                    if (found)
+                    {
+                        float zDiff = Math.Abs(playerPos.Z - tempPos.Z);
+
+                        if (zDiff < 1.0f) // 1 meter tolerance
+                        {
+                            float dist = Vector3.Distance(playerPos, tempPos);
+                            if (dist < closestDist)
+                            {
+                                closestDist = dist;
+                                finalSnappedPos = tempPos;
+                                finalHeading = tempHeading;
+                                foundValidNode = true;
+                            }
+                        }
+                    }
+                }
+
+                if (foundValidNode)
+                {
+                    pos = finalSnappedPos;
+                    Game.DisplayNotification($"Checkpoint {checkpoints.Count + 1} added (Snapped)");
+                }
+                else
+                {
+                    // If no node was found within height tolerance, use the ground at player's feet
+                    pos = GetGroundPos(playerPos);
+                    Game.DisplayNotification("~y~No nearby road at this height.~w~ Using player pos.");
+                }
+            }
+            else
+            {
+                Game.DisplayNotification($"Checkpoint {checkpoints.Count + 1} added (Manual)");
             }
             checkpoints.Add(pos);
             previewBlips.Add(new Blip(pos) { Color = Color.DeepSkyBlue });
@@ -384,18 +477,5 @@ namespace RaceTrackCreator
         }
 
         public class StartPos { public Vector3 Position { get; set; } public float Heading { get; set; } }
-    }
-
-    /// <summary>
-    /// Rotates a Vector3 around the Z-axis by a given heading in degrees.
-    /// </summary>
-    public static class Vector3Extensions
-    {
-        public static Vector3 RotateZ(this Vector3 v, float h)
-        {
-            float r = h * (float)Math.PI / 180f;
-            float c = (float)Math.Cos(r), s = (float)Math.Sin(r);
-            return new Vector3(v.X * c - v.Y * s, v.X * s + v.Y * c, v.Z);
-        }
     }
 }

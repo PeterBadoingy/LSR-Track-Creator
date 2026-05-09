@@ -216,15 +216,15 @@ namespace RaceTrackCreator
             Vector3 playerPos = Game.LocalPlayer.Character.Position;
 
             float groundZ;
-            bool foundGround = NativeFunction.Natives.GET_GROUND_Z_FOR_3D_COORD<bool>(pos.X, pos.Y, pos.Z + 10.0f, out groundZ, false);
+            bool foundGround = NativeFunction.Natives.GET_GROUND_Z_FOR_3D_COORD<bool>(pos.X, pos.Y, pos.Z + 4.0f, out groundZ, false);
 
             if (foundGround)
             {
                 return new Vector3(pos.X, pos.Y, groundZ);
             }
             int handle = NativeFunction.Natives.START_SHAPE_TEST_CAPSULE<int>(
-                pos.X, pos.Y, pos.Z - 20.0f,
-                pos.X, pos.Y, pos.Z + 20.0f,
+                pos.X, pos.Y, pos.Z - 4.0f,
+                pos.X, pos.Y, pos.Z + 4.0f,
                 1.0f, 1, 0, 7);
 
             bool hit; Vector3 endPos, surfaceNormal; int entityHit;
@@ -249,9 +249,8 @@ namespace RaceTrackCreator
                 v.IsCollisionProof = true;
                 v.IsPersistent = true;
 
-                
-                NativeFunction.Natives.SET_VEHICLE_ON_GROUND_PROPERLY(v, true);          
                 v.IsPositionFrozen = true;
+                NativeFunction.Natives.SET_VEHICLE_ON_GROUND_PROPERLY(v, true);          
                 previewVehicles.Add(v);
             }
         }

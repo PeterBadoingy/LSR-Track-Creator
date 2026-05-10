@@ -78,7 +78,7 @@ namespace RaceTrackCreator
             };
             mainMenu.AddItem(sideItem);
 
-            UIMenuListItem wideItem = new UIMenuListItem("Cars Wide", new List<dynamic> { 1, 2, 3, 4 }, 0);
+            UIMenuListItem wideItem = new UIMenuListItem("Cars Wide", new List<dynamic> { 0, 1, 2, 3 }, 0);
             wideItem.OnListChanged += (s, i) => { carsWide = wideItem.Index + 1; UpdateStarts(); };
             mainMenu.AddItem(wideItem);
 
